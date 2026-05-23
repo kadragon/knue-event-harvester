@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { processNewItem } from '../src/index.js';
 import {
   normalizeDate,
   isWithinLastWeek,
   buildDescription,
-  processNewItem,
   formatDateForDisplay,
   calculateDaysDuration,
   splitLongEvent,
-} from '../src/index.js';
+} from '../src/lib/transforms.js';
 import type { RssItem, AiSummary, CalendarEventInput, ProcessedRecord } from '../src/types.js';
 
 describe('index.ts Core Functions', () => {

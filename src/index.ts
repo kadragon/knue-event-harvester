@@ -8,7 +8,6 @@ import {
 } from "./lib/calendar.js";
 import { isDuplicate, computeHash } from "./lib/dedupe.js";
 import { sendNotification } from "./lib/telegram.js";
-
 import { parseRss } from "./lib/rss.js";
 import {
   getProcessedRecord,
@@ -19,15 +18,15 @@ import {
   LEGACY_FEED_ID,
   type StateEnv,
 } from "./lib/state.js";
+import { isWithinLastWeek, buildDescription, splitLongEvent } from "./lib/transforms.js";
 import type {
   CalendarEventInput,
   FeedSource,
   ProcessedRecord,
   RssItem,
-  AiSummary,
   PreviewContent,
 } from "./types.js";
-import { deduplicateLinks, buildAttachmentFromFile, getFileType } from "./lib/utils.js";
+import { buildAttachmentFromFile, getFileType } from "./lib/utils.js";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
@@ -46,13 +45,7 @@ export const FEEDS: readonly FeedSource[] = [
   },
 ];
 
-/**
- * Build Google Calendar event URL with proper eid encoding
- * Format: https://calendar.google.com/calendar/u/0/r/event?eid={base64url(eventId + " " + calendarId)}
- * Trace: SPEC-TELEGRAM-IMPROVEMENTS-001, AC-2
- */
 function buildCalendarEventUrl(eventId: string, calendarId: string): string {
-  // eid format: Base64URL(eventId + " " + calendarId)
   const eidRaw = `${eventId} ${calendarId}`;
   const eidEncoded = btoa(eidRaw)
     .replace(/\+/g, '-')
@@ -63,158 +56,10 @@ function buildCalendarEventUrl(eventId: string, calendarId: string): string {
 
 async function fetchRssFeed(url: string): Promise<string> {
   const response = await fetch(url, {
-    headers: {
-      "User-Agent": "knue-event-harvester/1.0",
-    },
+    headers: { "User-Agent": "knue-event-harvester/1.0" },
   });
-  if (!response.ok) {
-    throw new Error(`RSS fetch failed: ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`RSS fetch failed: ${response.status}`);
   return response.text();
-}
-
-export function normalizeDate(pubDate: string): string {
-  if (!pubDate) {
-    const today = new Date();
-    return today.toISOString().slice(0, 10);
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(pubDate)) return pubDate;
-  const parsed = new Date(pubDate);
-  if (Number.isNaN(parsed.getTime())) {
-    const today = new Date();
-    return today.toISOString().slice(0, 10);
-  }
-  return parsed.toISOString().slice(0, 10);
-}
-
-/**
- * Check if pubDate is within the last 7 days from today
- * Returns true if the item should be processed, false if it's too old
- */
-export function isWithinLastWeek(pubDate: string): boolean {
-  if (!pubDate) return true; // Process if no pubDate available
-
-  try {
-    const normalizedDate = normalizeDate(pubDate);
-    const itemDate = new Date(normalizedDate);
-    const today = new Date();
-
-    // Set time to midnight for accurate day comparison
-    itemDate.setHours(0, 0, 0, 0);
-    today.setHours(0, 0, 0, 0);
-
-    // Calculate days difference
-    const diffTime = today.getTime() - itemDate.getTime();
-    const diffDays = diffTime / (1000 * 60 * 60 * 24);
-
-    // Include items from last 7 days and future items
-    return diffDays <= 7 && diffDays >= -30; // Allow up to 30 days in future for upcoming events
-  } catch (error) {
-    console.warn("Failed to parse pubDate for filtering:", pubDate, error);
-    return true; // Process if parsing fails (fail-open)
-  }
-}
-
-const MAX_HIGHLIGHTS = 4;
-const MAX_ACTION_ITEMS = 2;
-
-export function buildDescription(
-  item: RssItem,
-  summary: AiSummary
-): string {
-  const parts: string[] = [];
-  parts.push(summary.summary);
-  const limitedHighlights = summary.highlights.slice(0, MAX_HIGHLIGHTS);
-  if (limitedHighlights.length > 0) {
-    parts.push(
-      "주요 포인트:\n" +
-        limitedHighlights.map((line) => `- ${line}`).join("\n")
-    );
-  }
-  const limitedActions = summary.actionItems.slice(0, MAX_ACTION_ITEMS);
-  if (limitedActions.length > 0) {
-    parts.push(
-      "확인/신청 사항:\n" +
-        limitedActions.map((line) => `- ${line}`).join("\n")
-    );
-  }
-  if (summary.links.length > 0 || item.link) {
-    // AC-1: 링크 중복 제거 (원문 링크를 우선순위로)
-    const uniqueLinks = deduplicateLinks(item.link, summary.links);
-    parts.push(
-      "관련 링크:\n" + uniqueLinks.map((link) => `- ${link}`).join("\n")
-    );
-  }
-  return parts.join("\n\n");
-}
-
-/**
- * Format date for display, omitting year if it matches current year
- * @param date - Date in YYYY-MM-DD format
- * @returns Formatted date (MM-DD if current year, YYYY-MM-DD otherwise)
- */
-export function formatDateForDisplay(date: string): string {
-  const currentYear = new Date().getFullYear();
-  const dateYear = parseInt(date.substring(0, 4), 10);
-
-  if (dateYear === currentYear) {
-    // Return MM-DD format (omit year)
-    return date.substring(5); // Returns "MM-DD"
-  }
-
-  // Return full YYYY-MM-DD format
-  return date;
-}
-
-/**
- * Calculate the number of days between two dates (inclusive)
- * @param startDate - Start date in YYYY-MM-DD format
- * @param endDate - End date in YYYY-MM-DD format
- * @returns Number of days (inclusive)
- */
-export function calculateDaysDuration(startDate: string, endDate: string): number {
-  const start = new Date(`${startDate}T00:00:00Z`);
-  const end = new Date(`${endDate}T00:00:00Z`);
-  const diffTime = end.getTime() - start.getTime();
-  const diffDays = diffTime / (1000 * 60 * 60 * 24);
-  return diffDays + 1; // +1 to make it inclusive (e.g., same day = 1 day)
-}
-
-/**
- * Split long events (>3 days) into two separate events: one for start date, one for end date
- * @param eventInput - Original event input
- * @returns Array of 1 or 2 events (split if duration > 3 days)
- */
-export function splitLongEvent(eventInput: CalendarEventInput): CalendarEventInput[] {
-  const duration = calculateDaysDuration(eventInput.startDate, eventInput.endDate);
-
-  // If duration is 3 days or less, return the original event
-  if (duration <= 3) {
-    return [eventInput];
-  }
-
-  // Format dates for display (omit year if current year)
-  const formattedStartDate = formatDateForDisplay(eventInput.startDate);
-  const formattedEndDate = formatDateForDisplay(eventInput.endDate);
-
-  // Split into two events
-  const startEvent: CalendarEventInput = {
-    ...eventInput,
-    title: `${eventInput.title} (~${formattedEndDate})`,
-    endDate: eventInput.startDate, // Make it single-day event
-    startTime: eventInput.startTime,
-    endTime: eventInput.endTime,
-  };
-
-  const endEvent: CalendarEventInput = {
-    ...eventInput,
-    title: `${eventInput.title} (${formattedStartDate}~)`,
-    startDate: eventInput.endDate, // Make it single-day event
-    startTime: eventInput.startTime,
-    endTime: eventInput.endTime,
-  };
-
-  return [startEvent, endEvent];
 }
 
 async function fetchImageAsBase64(url: string): Promise<PreviewContent | null> {
@@ -234,15 +79,12 @@ async function fetchImageAsBase64(url: string): Promise<PreviewContent | null> {
   }
 }
 
-export async function processNewItem(
+// Stage 1: Enrich item with OCR + AI outputs.
+// I/O: image fetch, Ollama calls. Returns fully described event inputs.
+async function enrichItem(
   env: Env,
-  feedId: string,
   item: RssItem,
-  accessToken: string,
-  existingEvents: GoogleCalendarEvent[],
-  similarityThreshold: number
-): Promise<GoogleCalendarEvent[]> {
-  // OCR: 첨부 이미지가 있으면 vision 모델로 텍스트 추출
+): Promise<{ eventInputs: CalendarEventInput[] }> {
   let previewText: string | undefined;
   if (item.attachment?.url && getFileType(item.attachment.filename) === "image") {
     const imageContent = await fetchImageAsBase64(item.attachment.url);
@@ -254,131 +96,128 @@ export async function processNewItem(
     }
   }
 
-  const [summary, eventInputs] = await Promise.all([
+  const [summary, rawInputs] = await Promise.all([
     generateSummary(env, {
       title: item.title,
       description: item.descriptionHtml,
       previewText,
-      attachmentText: item.attachment
-        ? item.attachment.filename
-          ? `첨부파일: ${item.attachment.filename}`
-          : undefined
+      attachmentText: item.attachment?.filename
+        ? `첨부파일: ${item.attachment.filename}`
         : undefined,
       link: item.link,
       pubDate: item.pubDate,
     }),
     generateEventInfos(env, item, previewText),
   ]);
-  const createdEvents: GoogleCalendarEvent[] = [];
 
-  for (let eventInput of eventInputs) {
-    // Default endTime to startTime to ensure timed events are consistently deduplicated
-    if (eventInput.startTime && !eventInput.endTime) {
-      eventInput = {
-        ...eventInput,
-        endTime: eventInput.startTime,
-      };
-    }
-    // AC-2, AC-3: 원본 본문과 첨부파일 정보 제거
-    const description = buildDescription(item, summary);
-    eventInput.description = description;
+  const description = buildDescription(item, summary);
+  const eventInputs = rawInputs.map((raw) => {
+    const withEndTime = raw.startTime && !raw.endTime ? { ...raw, endTime: raw.startTime } : raw;
+    return { ...withEndTime, description };
+  });
 
-    // Split long events (>3 days) into two separate events
-    const eventsToCreate = splitLongEvent(eventInput);
+  return { eventInputs };
+}
 
-    // Prepare and validate all split events before creating any
-    // This ensures atomicity: either all parts are created or none
-    type PreparedEvent = {
-      input: CalendarEventInput;
-      hash: string;
-      meta: ProcessedRecord;
+type PreparedEvent = {
+  input: CalendarEventInput;
+  hash: string;
+  meta: ProcessedRecord;
+};
+
+// Stage 2: Validate one event group (original + splits) against existing events.
+// No external I/O — only crypto.subtle and in-memory comparison.
+async function validateEventGroup(
+  eventInput: CalendarEventInput,
+  existingEvents: GoogleCalendarEvent[],
+  feedId: string,
+  itemId: string,
+  threshold: number,
+): Promise<{ kind: "duplicate"; skipHash: string } | { kind: "novel"; prepared: PreparedEvent[] }> {
+  const eventsToCreate = splitLongEvent(eventInput);
+  const prepared: PreparedEvent[] = [];
+
+  for (const splitEvent of eventsToCreate) {
+    const hash = await computeHash(splitEvent);
+    const meta: ProcessedRecord = {
+      eventId: "",
+      nttNo: itemId,
+      processedAt: new Date().toISOString(),
+      hash,
+      feedId,
     };
 
-    const preparedEvents: PreparedEvent[] = [];
-    let hasDuplicate = false;
-
-    for (const splitEvent of eventsToCreate) {
-      const hash = await computeHash(splitEvent);
-      const meta: ProcessedRecord = {
-        eventId: "",
-        nttNo: item.id,
-        processedAt: new Date().toISOString(),
-        hash,
-        feedId,
-      };
-
-      const duplicate = await isDuplicate(existingEvents, splitEvent, {
-        threshold: similarityThreshold,
-        meta,
-      });
-
-      if (duplicate) {
-        console.log(
-          `Duplicate detected for ${item.id} event: ${splitEvent.title}`
-        );
-        hasDuplicate = true;
-        break; // Stop checking if any part is duplicate
-      }
-
-      preparedEvents.push({ input: splitEvent, hash, meta });
+    if (await isDuplicate(existingEvents, splitEvent, { threshold, meta })) {
+      console.log(`Duplicate detected for ${itemId} event: ${splitEvent.title}`);
+      return { kind: "duplicate", skipHash: prepared[0]?.hash ?? "" };
     }
 
-    // If any part is duplicate, skip the entire event group
-    if (hasDuplicate) {
+    prepared.push({ input: splitEvent, hash, meta });
+  }
+
+  return { kind: "novel", prepared };
+}
+
+export async function processNewItem(
+  env: Env,
+  feedId: string,
+  item: RssItem,
+  accessToken: string,
+  existingEvents: GoogleCalendarEvent[],
+  similarityThreshold: number,
+): Promise<GoogleCalendarEvent[]> {
+  const { eventInputs } = await enrichItem(env, item);
+  const createdEvents: GoogleCalendarEvent[] = [];
+  const attachments = buildAttachmentFromFile(item);
+
+  for (const eventInput of eventInputs) {
+    const result = await validateEventGroup(
+      eventInput, existingEvents, feedId, item.id, similarityThreshold,
+    );
+
+    if (result.kind === "duplicate") {
       await putProcessedRecord(env, feedId, item.id, {
         eventId: "duplicate-skip",
         nttNo: item.id,
         processedAt: new Date().toISOString(),
-        hash: preparedEvents[0]?.hash ?? "",
+        hash: result.skipHash,
         feedId,
       });
       continue;
     }
 
-    // Create all events (now we know none are duplicates)
-    const newlyCreatedEvents: GoogleCalendarEvent[] = [];
-    const attachments = buildAttachmentFromFile(item);
-
-    for (const prepared of preparedEvents) {
-      const created = await createEvent(env, accessToken, prepared.input, prepared.meta, {
-        summaryHash: prepared.hash,
-        feedId,
-      }, attachments ? [attachments] : undefined);
-
-      newlyCreatedEvents.push(created);
+    // Create all events in the group (none are duplicates)
+    const newlyCreated: GoogleCalendarEvent[] = [];
+    for (const prepared of result.prepared) {
+      const created = await createEvent(
+        env, accessToken, prepared.input, prepared.meta,
+        { summaryHash: prepared.hash, feedId },
+        attachments ? [attachments] : undefined,
+      );
+      newlyCreated.push(created);
     }
 
-    // All events created successfully, now commit state changes atomically
-    for (let i = 0; i < newlyCreatedEvents.length; i++) {
-      const created = newlyCreatedEvents[i];
-      const prepared = preparedEvents[i];
-
+    // Commit state and notify after all events in group are created
+    for (let i = 0; i < newlyCreated.length; i++) {
+      const created = newlyCreated[i];
+      const prepared = result.prepared[i];
       await putProcessedRecord(env, feedId, item.id, {
         ...prepared.meta,
         eventId: created.id,
       });
-
       existingEvents.push(created);
       createdEvents.push(created);
-
-      // Send Telegram notification (fire-and-forget, errors handled internally)
-      // Prefer htmlLink from API, fallback to building URL with proper eid encoding
       const calendarUrl = created.htmlLink ?? buildCalendarEventUrl(created.id, env.GOOGLE_CALENDAR_ID);
       await sendNotification(
-        {
-          eventTitle: prepared.input.title,
-          rssUrl: item.link,
-          eventUrl: calendarUrl,
-        },
-        env
+        { eventTitle: prepared.input.title, rssUrl: item.link, eventUrl: calendarUrl },
+        env,
       );
     }
   }
 
-  // 의미있는 일정이 없었을 때 상태 저장 (한 번 시도 후 더 이상 재시도하지 않음)
   if (eventInputs.length === 0) {
     console.log(
-      `No meaningful events extracted for item ${item.id} (feed=${feedId}), marking as processed`
+      `No meaningful events extracted for item ${item.id} (feed=${feedId}), marking as processed`,
     );
     await putProcessedRecord(env, feedId, item.id, {
       eventId: "",
@@ -466,16 +305,10 @@ async function runFeed(
 
     try {
       const results = await processNewItem(
-        env,
-        feed.id,
-        item,
-        accessToken,
-        existing,
-        similarityThreshold,
+        env, feed.id, item, accessToken, existing, similarityThreshold,
       );
       processed += 1;
       created += results.length;
-
       if (!Number.isNaN(itemId) && itemId > maxSuccessfulId) {
         maxSuccessfulId = itemId;
       }
@@ -540,9 +373,6 @@ const isMain = (() => {
   try {
     return fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
   } catch (err) {
-    // argv[1] missing is expected (e.g. bundled launcher); other errno
-    // values (EACCES, ELOOP) indicate a broken install — surface them so
-    // a silently no-op CLI doesn't masquerade as healthy.
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     console.warn("isMain: unexpected error resolving argv[1]:", err);
     return false;

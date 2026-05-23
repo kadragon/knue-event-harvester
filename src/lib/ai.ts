@@ -305,6 +305,6 @@ export async function generateEventInfos(
     return parseEventJsonArray(content, item.pubDate);
   } catch (error) {
     console.error("generateEventInfos failed", error);
-    throw error;
+    return [];
   }
 }

@@ -324,10 +324,11 @@ describe('AI Module', () => {
       expect(result[0].endDate).toBe(mockItem.pubDate);
     });
 
-    it('should throw on Ollama error', async () => {
+    it('should return empty array on Ollama error', async () => {
       fetchMock.mockResolvedValueOnce(ollamaError());
 
-      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow('Ollama request failed');
+      const result = await generateEventInfos(mockEnv, mockItem);
+      expect(result).toHaveLength(0);
     });
 
     it('should handle malformed JSON response and return empty array', async () => {
