@@ -1,7 +1,6 @@
 import type { CalendarEventInput, ProcessedRecord } from "../types.js";
 import type { GoogleCalendarEvent } from "./calendar.js";
-
-const LEGACY_FEED_ID = "bbs28";
+import { LEGACY_FEED_ID } from "./state.js";
 
 export function normalizedLevenshtein(a: string, b: string): number {
   const source = a.trim().toLowerCase();

@@ -149,7 +149,7 @@ async function validateEventGroup(
 
     if (await isDuplicate(existingEvents, splitEvent, { threshold, meta })) {
       console.log(`Duplicate detected for ${itemId} event: ${splitEvent.title}`);
-      return { kind: "duplicate", skipHash: prepared[0]?.hash ?? "" };
+      return { kind: "duplicate", skipHash: prepared[0]?.hash ?? hash };
     }
 
     prepared.push({ input: splitEvent, hash, meta });
