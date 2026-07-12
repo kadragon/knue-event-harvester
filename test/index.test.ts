@@ -222,6 +222,12 @@ describe('index.ts Core Functions', () => {
       expect(formatDateForDisplay('2025-12-31')).toBe('12-31');
       expect(formatDateForDisplay('2026-01-01')).toBe('2026-01-01');
     });
+
+    it('should throw on malformed input', () => {
+      expect(() => formatDateForDisplay('')).toThrow();
+      expect(() => formatDateForDisplay('not-a-date')).toThrow();
+      expect(() => formatDateForDisplay('2025/10/28')).toThrow();
+    });
   });
 
   describe('calculateDaysDuration', () => {

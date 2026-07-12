@@ -116,3 +116,4 @@ The sweep checks:
 | `SQLITE_CANTOPEN` | `data/` directory does not exist | `mkdir -p data` |
 | Duplicate Calendar events | Concurrent `run.sh` invocations | Add `flock` to cron (see above) |
 | Coverage below threshold | New code in `src/lib/**` without tests | Write tests; `npm run test:coverage` shows uncovered lines |
+| `test/lib/state.test.ts` fails with `bindings.js` / `Cannot read properties of undefined (reading 'close')` | `better-sqlite3` native binding missing/mismatched for this Node/arch | `npm rebuild better-sqlite3` (or reinstall `node_modules`) |

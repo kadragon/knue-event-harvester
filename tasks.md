@@ -10,6 +10,4 @@ Deferred from dev-review-cycle on 2026-04-17. Cross-feed ingestion is shipping; 
 
 Deferred from dev-review-cycle on 2026-05-23. Refactor stage-pipeline improvements; these are quality-of-life polish not introduced by the PR.
 
-- [ ] **transforms.ts:33 — fail-open comment** — `isWithinLastWeek` catch returns `true` with no explanation. Add one-line `// fail-open: process if date unparseable` comment.
-- [ ] **transforms.ts:60 — formatDateForDisplay input validation** — no guard for empty/malformed strings. Pre-existing; now a public API. Add regex assertion or accept `Date` type.
-- [ ] **index.ts:218 — distinguish AI error vs. no events** — `eventInputs.length === 0` fires for both Ollama failure and genuine "no events". Consider a typed result from `enrichItem` to separate the two paths and log accordingly.
+- [ ] **index.ts:218 — distinguish AI error vs. no events** — `eventInputs.length === 0` fires for both Ollama failure and genuine "no events". Scoped out of the 2026-07 polish pass: fixing this properly means changing `generateEventInfos`'s return type (e.g. `{ events, parseFailed }`), which ~10 unit tests in `test/lib/ai.test.ts` plus mocks in `test/index.integration.test.ts`/`test/index.test.ts` assert as a plain array — a real API change, not a small polish edit. Needs its own sprint with test updates in scope.
