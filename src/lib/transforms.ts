@@ -30,6 +30,7 @@ export function isWithinLastWeek(pubDate: string): boolean {
     return diffDays <= 7 && diffDays >= -30;
   } catch (error) {
     console.warn("Failed to parse pubDate for filtering:", pubDate, error);
+    // fail-open: include the item rather than silently dropping it on a parse error
     return true;
   }
 }
@@ -53,6 +54,9 @@ export function buildDescription(item: RssItem, summary: AiSummary): string {
 }
 
 export function formatDateForDisplay(date: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`formatDateForDisplay: expected YYYY-MM-DD, got "${date}"`);
+  }
   const currentYear = new Date().getFullYear();
   const dateYear = parseInt(date.substring(0, 4), 10);
   return dateYear === currentYear ? date.substring(5) : date;
