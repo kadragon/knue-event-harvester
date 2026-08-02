@@ -299,13 +299,19 @@ async function runFeed(
       continue;
     }
 
-    if (Number.isNaN(itemId)) {
-      const already = await getProcessedRecord(env, feed.id, item.id);
-      if (already) {
-        alreadyProcessedItems.push(item.id);
-        processed += 1;
-        continue;
+    // Check the processed record for every item, not just non-numeric ids: once a failure
+    // caps the watermark, the numeric items above the cap are re-read each run, and only
+    // this lookup keeps them from paying for AI enrichment (and re-writing their record)
+    // again. They still count toward maxSuccessfulId so the watermark can move once the
+    // failure clears.
+    const already = await getProcessedRecord(env, feed.id, item.id);
+    if (already) {
+      alreadyProcessedItems.push(item.id);
+      processed += 1;
+      if (!Number.isNaN(itemId) && itemId > maxSuccessfulId) {
+        maxSuccessfulId = itemId;
       }
+      continue;
     }
 
     try {
@@ -333,6 +339,12 @@ async function runFeed(
   // later success is skipped forever, because the watermark jumps past it. Items above the
   // cap get re-read next run — duplicate creation is already blocked by validateEventGroup.
   const watermark = Math.min(maxSuccessfulId, minFailedId - 1);
+  if (watermark < maxSuccessfulId) {
+    // Make the stall observable: an item that never succeeds pins the feed here forever.
+    console.warn(
+      `[${feed.id}] Watermark held at ${watermark} instead of ${maxSuccessfulId} by failed item ${minFailedId} — it will be retried next run`,
+    );
+  }
   if (watermark > 0) {
     await updateMaxProcessedId(env, feed.id, watermark.toString());
   }

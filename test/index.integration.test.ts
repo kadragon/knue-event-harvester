@@ -366,6 +366,50 @@ describe('Integration Tests', () => {
       vi.useRealTimers();
     });
 
+    it('skips a numeric item that already has a processed record above the watermark', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const items: RssItem[] = [
+        {
+          id: '401',
+          title: '이미 처리됨',
+          link: 'https://www.knue.ac.kr/notice/401',
+          pubDate: '2026-04-16',
+          descriptionHtml: '<p>본문</p>',
+        },
+      ];
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue(items);
+      // maxProcessedId is capped below 401 by an earlier failure, so the id check does not
+      // filter this item — only the processed-record lookup can.
+      (getMaxProcessedId as ReturnType<typeof vi.fn>).mockResolvedValue(300);
+      (getProcessedRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
+        eventId: 'evt-401',
+        nttNo: '401',
+        processedAt: '2026-04-16T00:00:00.000Z',
+        hash: 'hash',
+        feedId: NOTICE_FEED.id,
+      });
+
+      const stats = await run(mockEnv, [NOTICE_FEED]);
+
+      // No AI enrichment, no calendar write, and the record is left untouched.
+      expect(generateEventInfos).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(putProcessedRecord).not.toHaveBeenCalled();
+      expect(stats).toEqual({ processed: 1, created: 0 });
+
+      // An already-processed item still lets the watermark move forward.
+      expect(updateMaxProcessedId).toHaveBeenCalledWith(mockEnv, NOTICE_FEED.id, '401');
+
+      vi.useRealTimers();
+    });
+
     it('advances the watermark to the newest success when nothing fails', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-17'));
