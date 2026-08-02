@@ -199,23 +199,38 @@ function buildEventInput(event: AiEvent, pubDate: string): CalendarEventInput {
   };
 }
 
-async function parseEventJsonArray(content: string | undefined, pubDate: string): Promise<CalendarEventInput[]> {
-  if (!content) return [];
-  try {
-    const data = JSON.parse(content);
-    if (Array.isArray(data.events)) {
-      const events = data.events as AiEvent[];
-      return events
-        .map((event) => buildEventInput(event, pubDate))
-        .filter((event) => event.title && event.description);
-    } else {
-      console.warn("Unexpected response format: missing events array", content);
-      return [];
-    }
-  } catch (error) {
-    console.error("Failed to parse event JSON", error, content);
-    return [];
+/**
+ * Thrown when the AI responded but its payload could not be read as an event list.
+ *
+ * Distinct from a transport error: both abort the item, but this one says the model
+ * answered and we could not use the answer. Neither may be confused with the model
+ * legitimately reporting no events — that is an empty array, not a throw.
+ */
+export class AiResponseParseError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "AiResponseParseError";
   }
+}
+
+async function parseEventJsonArray(content: string | undefined, pubDate: string): Promise<CalendarEventInput[]> {
+  if (!content) {
+    throw new AiResponseParseError("Ollama returned no event content");
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(content);
+  } catch (error) {
+    throw new AiResponseParseError(`Failed to parse event JSON: ${content}`, { cause: error });
+  }
+  const events = (data as { events?: unknown })?.events;
+  if (!Array.isArray(events)) {
+    throw new AiResponseParseError(`Unexpected response format: missing events array: ${content}`);
+  }
+  // An empty array here is the model's genuine "no events" answer — pass it through.
+  return (events as AiEvent[])
+    .map((event) => buildEventInput(event, pubDate))
+    .filter((event) => event.title && event.description);
 }
 
 export async function generateEventInfos(
@@ -259,8 +274,9 @@ export async function generateEventInfos(
     additionalProperties: false,
   };
 
+  let content: string | undefined;
   try {
-    const content = await callOllamaChat(env, {
+    content = await callOllamaChat(env, {
       model: env.OLLAMA_CONTENT_MODEL,
       messages: [
         {
@@ -302,9 +318,11 @@ export async function generateEventInfos(
       ],
       schema,
     });
-    return parseEventJsonArray(content, item.pubDate);
   } catch (error) {
     console.error("generateEventInfos failed", error);
     throw error;
   }
+
+  // Parsed outside the try so a bad payload is not relabelled as a request failure.
+  return parseEventJsonArray(content, item.pubDate);
 }

@@ -215,9 +215,12 @@ export async function processNewItem(
     }
   }
 
+  // Trace: AC-7 — reaching here means the AI answered with an empty event list.
+  // A failed AI call throws instead (AiResponseParseError or a transport error), so the
+  // item is left unrecorded rather than being permanently marked processed.
   if (eventInputs.length === 0) {
     console.log(
-      `No meaningful events extracted for item ${item.id} (feed=${feedId}), marking as processed`,
+      `AI returned no events for item ${item.id} (feed=${feedId}), marking as processed`,
     );
     await putProcessedRecord(env, feedId, item.id, {
       eventId: "",
