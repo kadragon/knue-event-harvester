@@ -30,3 +30,5 @@ coverage/
 # Harness runtime artifacts
 tools/.sweep-stamp
 .lock-hash
+.agents/.maintenance-stamp
+.antigravitycli/
