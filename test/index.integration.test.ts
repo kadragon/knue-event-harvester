@@ -43,7 +43,12 @@ vi.mock('../src/lib/telegram.js', () => ({
 import { parseRss } from '../src/lib/rss.js';
 import { AiResponseParseError, generateSummary, generateEventInfos } from '../src/lib/ai.js';
 import { obtainAccessToken, listEvents, createEvent } from '../src/lib/calendar.js';
-import { getMaxProcessedId, getProcessedRecord, putProcessedRecord } from '../src/lib/state.js';
+import {
+  getMaxProcessedId,
+  getProcessedRecord,
+  putProcessedRecord,
+  updateMaxProcessedId,
+} from '../src/lib/state.js';
 import { isDuplicate, computeHash } from '../src/lib/dedupe.js';
 
 const NOTICE_FEED: FeedSource = {
@@ -344,8 +349,7 @@ describe('Integration Tests', () => {
 
       const stats = await run(mockEnv, [NOTICE_FEED]);
 
-      // The failed item gets no processed record. (Retry is still not guaranteed: runFeed
-      // advances the watermark past it — see the watermark item in tasks.md.)
+      // The failed item gets no processed record, so the next run re-reads it.
       const recordedItemIds = (putProcessedRecord as ReturnType<typeof vi.fn>).mock.calls.map(
         (call) => call[2],
       );
@@ -354,6 +358,62 @@ describe('Integration Tests', () => {
       // Trace: AC-6 — the rest of the feed still runs (Golden Principle 4).
       expect(recordedItemIds).toContain('202');
       expect(stats.created).toBe(1);
+
+      // The watermark must stay below the failed id so the next run reaches it again,
+      // even though the newer item 202 succeeded.
+      expect(updateMaxProcessedId).toHaveBeenCalledWith(mockEnv, NOTICE_FEED.id, '200');
+
+      vi.useRealTimers();
+    });
+
+    it('advances the watermark to the newest success when nothing fails', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const items: RssItem[] = [
+        {
+          id: '301',
+          title: '정상 1',
+          link: 'https://www.knue.ac.kr/notice/301',
+          pubDate: '2026-04-16',
+          descriptionHtml: '<p>본문</p>',
+        },
+        {
+          id: '302',
+          title: '정상 2',
+          link: 'https://www.knue.ac.kr/notice/302',
+          pubDate: '2026-04-16',
+          descriptionHtml: '<p>본문</p>',
+        },
+      ];
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue(items);
+      (generateSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+        summary: '요약',
+        highlights: [],
+        actionItems: [],
+        links: [],
+      });
+      (generateEventInfos as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          title: '행사',
+          description: '',
+          startDate: '2026-04-20',
+          endDate: '2026-04-20',
+        },
+      ]);
+      (createEvent as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'evt',
+        htmlLink: 'https://calendar.example/evt',
+      });
+
+      await run(mockEnv, [NOTICE_FEED]);
+
+      expect(updateMaxProcessedId).toHaveBeenCalledWith(mockEnv, NOTICE_FEED.id, '302');
 
       vi.useRealTimers();
     });

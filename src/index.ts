@@ -217,9 +217,8 @@ export async function processNewItem(
 
   // Trace: AC-7 — reaching here means the AI answered with an empty event list.
   // A failed AI call throws instead (AiResponseParseError or a transport error), so no
-  // processed record is written for the item. Note: runFeed still advances the feed
-  // watermark to the max successful id, so a failed item older than a successful one is
-  // not retried on the next run — see the watermark item in tasks.md.
+  // processed record is written for the item. runFeed caps the feed watermark below the
+  // lowest failed id, so the item is picked up again on the next run.
   if (eventInputs.length === 0) {
     console.log(
       `AI returned no events for item ${item.id} (feed=${feedId}), marking as processed`,
@@ -285,6 +284,7 @@ async function runFeed(
   const skippedItems: string[] = [];
   const alreadyProcessedItems: string[] = [];
   let maxSuccessfulId = 0;
+  let minFailedId = Number.POSITIVE_INFINITY;
 
   for (const item of items) {
     const itemId = Number.parseInt(item.id, 10);
@@ -323,11 +323,18 @@ async function runFeed(
       // than at Ollama being down.
       const cause = error instanceof AiResponseParseError ? "unusable AI response" : "error";
       console.error(`Failed to process item ${item.id} (feed=${feed.id}) — ${cause}`, error);
+      if (!Number.isNaN(itemId) && itemId < minFailedId) {
+        minFailedId = itemId;
+      }
     }
   }
 
-  if (maxSuccessfulId > 0) {
-    await updateMaxProcessedId(env, feed.id, maxSuccessfulId.toString());
+  // Cap the watermark below the lowest failed id: without this, a failure older than a
+  // later success is skipped forever, because the watermark jumps past it. Items above the
+  // cap get re-read next run — duplicate creation is already blocked by validateEventGroup.
+  const watermark = Math.min(maxSuccessfulId, minFailedId - 1);
+  if (watermark > 0) {
+    await updateMaxProcessedId(env, feed.id, watermark.toString());
   }
 
   if (skippedItems.length > 0) {
