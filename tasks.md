@@ -6,8 +6,8 @@ Deferred from dev-review-cycle on 2026-04-17. Cross-feed ingestion is shipping; 
 
 - [ ] **Harness: Gemini review script fails on macOS** — `kadragon-tools:dev-review-cycle/scripts/gemini-review.sh` uses GNU `timeout`, which is absent by default on macOS. Not a repo issue, but skipped Gemini's review on this cycle. Either install `coreutils` locally or patch the script upstream (`gtimeout`/`perl -e alarm`).
 
-## Review backlog — PR #76 (out-of-scope polish)
+## Review backlog — AI failure handling (2026-08-02)
 
-Deferred from dev-review-cycle on 2026-05-23. Refactor stage-pipeline improvements; these are quality-of-life polish not introduced by the PR.
+Found while fixing the parse-failure/no-events ambiguity. Out of scope for that sprint.
 
-- [ ] **index.ts:218 — distinguish AI error vs. no events** — `eventInputs.length === 0` fires for both Ollama failure and genuine "no events". Scoped out of the 2026-07 polish pass: fixing this properly means changing `generateEventInfos`'s return type (e.g. `{ events, parseFailed }`), which ~10 unit tests in `test/lib/ai.test.ts` plus mocks in `test/index.integration.test.ts`/`test/index.test.ts` assert as a plain array — a real API change, not a small polish edit. Needs its own sprint with test updates in scope.
+- [ ] **index.ts:282,312-322 — a failed item can still be skipped forever** — `maxSuccessfulId` is a max over *successful* items, not a stop-at-first-failure watermark. When an item throws (transport error or `AiResponseParseError`) but a newer item in the same feed succeeds, the watermark advances past the failed item, and `index.ts:286-290` skips it on the next run. So "throws → retried next run" only holds when the failed item is the newest. Pre-existing; predates the parse-failure work. Fix likely means tracking the lowest failed id and capping the watermark below it.

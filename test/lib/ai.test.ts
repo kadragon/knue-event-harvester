@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { extractTextFromImage, generateSummary, generateEventInfos, type AiEnv } from '../../src/lib/ai.js';
+import { AiResponseParseError, extractTextFromImage, generateSummary, generateEventInfos, type AiEnv } from '../../src/lib/ai.js';
 import type { PreviewContent, RssItem } from '../../src/types.js';
 
 // Mock fetch globally
@@ -330,27 +330,47 @@ describe('AI Module', () => {
       await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow('Ollama request failed');
     });
 
-    it('should handle malformed JSON response and return empty array', async () => {
+    // Trace: AC-1 — a malformed response is a failure, not "no events"
+    it('should throw AiResponseParseError on malformed JSON response', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ message: { content: 'invalid json' } }),
       });
 
-      const result = await generateEventInfos(mockEnv, mockItem);
-
-      expect(result).toHaveLength(0);
+      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
     });
 
-    it('should return empty array when events array is missing from response', async () => {
+    // Trace: AC-2 — schema violation is a failure, not "no events"
+    it('should throw AiResponseParseError when events array is missing from response', async () => {
       fetchMock.mockResolvedValueOnce(ollamaOk({
         title: '단일 행사',
         description: '배열이 아닌 단일 객체',
       }));
 
-      const result = await generateEventInfos(mockEnv, mockItem);
-      expect(result).toHaveLength(0);
+      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
     });
 
+    // Trace: AC-3 — empty content means Ollama gave us nothing to parse
+    it('should throw AiResponseParseError when Ollama returns empty content', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ message: { content: '' } }),
+      });
+
+      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
+    });
+
+    // Trace: AC-3 — the model answered with events, but none survived validation.
+    // Dropping them all is a failed extraction, not a "no events" answer.
+    it('should throw AiResponseParseError when every returned event is unusable', async () => {
+      fetchMock.mockResolvedValueOnce(ollamaOk({
+        events: [{ title: '', description: '', startDate: '2025-11-01', endDate: '2025-11-01' }],
+      }));
+
+      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
+    });
+
+    // Trace: AC-4 — the one genuine "no events" case must still resolve, not throw
     it('should return empty array when AI returns empty events array', async () => {
       fetchMock.mockResolvedValueOnce(ollamaOk({ events: [] }));
 

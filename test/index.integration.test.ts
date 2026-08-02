@@ -7,7 +7,10 @@ vi.mock('../src/lib/rss.js', () => ({
   parseRss: vi.fn(),
 }));
 
-vi.mock('../src/lib/ai.js', () => ({
+vi.mock('../src/lib/ai.js', async (importOriginal) => ({
+  // Keep the real AiResponseParseError so tests can reject with the genuine class.
+  AiResponseParseError: (await importOriginal<typeof import('../src/lib/ai.js')>())
+    .AiResponseParseError,
   generateSummary: vi.fn(),
   generateEventInfos: vi.fn(),
   extractTextFromImage: vi.fn(),
@@ -38,7 +41,7 @@ vi.mock('../src/lib/telegram.js', () => ({
 }));
 
 import { parseRss } from '../src/lib/rss.js';
-import { generateSummary, generateEventInfos } from '../src/lib/ai.js';
+import { AiResponseParseError, generateSummary, generateEventInfos } from '../src/lib/ai.js';
 import { obtainAccessToken, listEvents, createEvent } from '../src/lib/calendar.js';
 import { getMaxProcessedId, getProcessedRecord, putProcessedRecord } from '../src/lib/state.js';
 import { isDuplicate, computeHash } from '../src/lib/dedupe.js';
@@ -284,6 +287,73 @@ describe('Integration Tests', () => {
         '777',
         expect.objectContaining({ feedId: 'bbs250' }),
       );
+
+      vi.useRealTimers();
+    });
+
+    // Trace: AC-6 — a parse failure must not be mistaken for "no events"
+    it('does not mark an item processed when the AI response fails to parse', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const unparseableItem: RssItem = {
+        id: '201',
+        title: '파싱 실패',
+        link: 'https://www.knue.ac.kr/notice/201',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>AI 응답이 깨진 케이스</p>',
+      };
+      const goodItem: RssItem = {
+        id: '202',
+        title: '정상',
+        link: 'https://www.knue.ac.kr/notice/202',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>정상 케이스</p>',
+      };
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue([unparseableItem, goodItem]);
+      (generateSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+        summary: '요약',
+        highlights: [],
+        actionItems: [],
+        links: [],
+      });
+      (generateEventInfos as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, item: RssItem) => {
+          if (item.id === '201') {
+            throw new AiResponseParseError('Failed to parse event JSON');
+          }
+          return [
+            {
+              title: '행사',
+              description: '',
+              startDate: '2026-04-20',
+              endDate: '2026-04-20',
+            },
+          ];
+        },
+      );
+      (createEvent as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'evt-202',
+        htmlLink: 'https://calendar.example/evt-202',
+      });
+
+      const stats = await run(mockEnv, [NOTICE_FEED]);
+
+      // The failed item gets no processed record. (Retry is still not guaranteed: runFeed
+      // advances the watermark past it — see the watermark item in tasks.md.)
+      const recordedItemIds = (putProcessedRecord as ReturnType<typeof vi.fn>).mock.calls.map(
+        (call) => call[2],
+      );
+      expect(recordedItemIds).not.toContain('201');
+
+      // Trace: AC-6 — the rest of the feed still runs (Golden Principle 4).
+      expect(recordedItemIds).toContain('202');
+      expect(stats.created).toBe(1);
 
       vi.useRealTimers();
     });
