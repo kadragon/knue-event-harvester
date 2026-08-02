@@ -207,10 +207,22 @@ function buildEventInput(event: AiEvent, pubDate: string): CalendarEventInput {
  * legitimately reporting no events — that is an empty array, not a throw.
  */
 export class AiResponseParseError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
+  /** Raw model payload, kept off the message so logs stay bounded. */
+  readonly payload?: string;
+
+  constructor(message: string, options?: { cause?: unknown; payload?: string }) {
+    super(message, { cause: options?.cause });
     this.name = "AiResponseParseError";
+    this.payload = options?.payload;
   }
+}
+
+const PAYLOAD_SNIPPET_LENGTH = 200;
+
+function snippet(content: string): string {
+  return content.length > PAYLOAD_SNIPPET_LENGTH
+    ? `${content.slice(0, PAYLOAD_SNIPPET_LENGTH)}…`
+    : content;
 }
 
 async function parseEventJsonArray(content: string | undefined, pubDate: string): Promise<CalendarEventInput[]> {
@@ -221,16 +233,32 @@ async function parseEventJsonArray(content: string | undefined, pubDate: string)
   try {
     data = JSON.parse(content);
   } catch (error) {
-    throw new AiResponseParseError(`Failed to parse event JSON: ${content}`, { cause: error });
+    throw new AiResponseParseError(`Failed to parse event JSON: ${snippet(content)}`, {
+      cause: error,
+      payload: content,
+    });
   }
   const events = (data as { events?: unknown })?.events;
   if (!Array.isArray(events)) {
-    throw new AiResponseParseError(`Unexpected response format: missing events array: ${content}`);
+    throw new AiResponseParseError(
+      `Unexpected response format: missing events array: ${snippet(content)}`,
+      { payload: content },
+    );
   }
   // An empty array here is the model's genuine "no events" answer — pass it through.
-  return (events as AiEvent[])
+  const parsed = (events as AiEvent[])
     .map((event) => buildEventInput(event, pubDate))
     .filter((event) => event.title && event.description);
+  // The schema allows empty-string title/description, which the fallbacks (`??`) do not
+  // catch. Dropping every event the model actually returned is a failed extraction, not
+  // a "no events" answer — the last path that could silently conflate the two.
+  if (events.length > 0 && parsed.length === 0) {
+    throw new AiResponseParseError(
+      `All ${events.length} extracted event(s) were unusable: ${snippet(content)}`,
+      { payload: content },
+    );
+  }
+  return parsed;
 }
 
 export async function generateEventInfos(

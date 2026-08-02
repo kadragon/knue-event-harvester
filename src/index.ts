@@ -1,4 +1,4 @@
-import { extractTextFromImage, generateEventInfos, generateSummary, type AiEnv } from "./lib/ai.js";
+import { AiResponseParseError, extractTextFromImage, generateEventInfos, generateSummary, type AiEnv } from "./lib/ai.js";
 import {
   obtainAccessToken,
   listEvents,
@@ -216,8 +216,10 @@ export async function processNewItem(
   }
 
   // Trace: AC-7 — reaching here means the AI answered with an empty event list.
-  // A failed AI call throws instead (AiResponseParseError or a transport error), so the
-  // item is left unrecorded rather than being permanently marked processed.
+  // A failed AI call throws instead (AiResponseParseError or a transport error), so no
+  // processed record is written for the item. Note: runFeed still advances the feed
+  // watermark to the max successful id, so a failed item older than a successful one is
+  // not retried on the next run — see the watermark item in tasks.md.
   if (eventInputs.length === 0) {
     console.log(
       `AI returned no events for item ${item.id} (feed=${feedId}), marking as processed`,
@@ -316,7 +318,11 @@ async function runFeed(
         maxSuccessfulId = itemId;
       }
     } catch (error) {
-      console.error(`Failed to process item ${item.id} (feed=${feed.id})`, error);
+      // Separate the two abort causes in the logs: a parse failure means the model
+      // answered and we could not use it, which points at the prompt or schema rather
+      // than at Ollama being down.
+      const cause = error instanceof AiResponseParseError ? "unusable AI response" : "error";
+      console.error(`Failed to process item ${item.id} (feed=${feed.id}) — ${cause}`, error);
     }
   }
 

@@ -360,6 +360,16 @@ describe('AI Module', () => {
       await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
     });
 
+    // Trace: AC-3 — the model answered with events, but none survived validation.
+    // Dropping them all is a failed extraction, not a "no events" answer.
+    it('should throw AiResponseParseError when every returned event is unusable', async () => {
+      fetchMock.mockResolvedValueOnce(ollamaOk({
+        events: [{ title: '', description: '', startDate: '2025-11-01', endDate: '2025-11-01' }],
+      }));
+
+      await expect(generateEventInfos(mockEnv, mockItem)).rejects.toThrow(AiResponseParseError);
+    });
+
     // Trace: AC-4 — the one genuine "no events" case must still resolve, not throw
     it('should return empty array when AI returns empty events array', async () => {
       fetchMock.mockResolvedValueOnce(ollamaOk({ events: [] }));

@@ -344,7 +344,8 @@ describe('Integration Tests', () => {
 
       const stats = await run(mockEnv, [NOTICE_FEED]);
 
-      // The failed item is never recorded, so it stays eligible instead of being lost.
+      // The failed item gets no processed record. (Retry is still not guaranteed: runFeed
+      // advances the watermark past it — see the watermark item in tasks.md.)
       const recordedItemIds = (putProcessedRecord as ReturnType<typeof vi.fn>).mock.calls.map(
         (call) => call[2],
       );
