@@ -32,6 +32,9 @@ vi.mock('../src/lib/state.js', () => ({
   putProcessedRecord: vi.fn(),
   getMaxProcessedId: vi.fn(),
   updateMaxProcessedId: vi.fn(),
+  getItemFailureCount: vi.fn(),
+  recordItemFailure: vi.fn(),
+  clearItemFailureCount: vi.fn(),
   openDatabase: vi.fn(),
   LEGACY_FEED_ID: 'bbs28',
 }));
@@ -48,6 +51,9 @@ import {
   getProcessedRecord,
   putProcessedRecord,
   updateMaxProcessedId,
+  getItemFailureCount,
+  recordItemFailure,
+  clearItemFailureCount,
 } from '../src/lib/state.js';
 import { isDuplicate, computeHash } from '../src/lib/dedupe.js';
 
@@ -87,6 +93,9 @@ describe('Integration Tests', () => {
     (getMaxProcessedId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (getProcessedRecord as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     (putProcessedRecord as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (getItemFailureCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (recordItemFailure as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+    (clearItemFailureCount as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
     (computeHash as ReturnType<typeof vi.fn>).mockResolvedValue('hash');
     (isDuplicate as ReturnType<typeof vi.fn>).mockResolvedValue(false);
   });
@@ -119,6 +128,8 @@ describe('Integration Tests', () => {
           descriptionHtml: '<p>Old content</p>',
         },
       ];
+      const failureKey = `${NOTICE_FEED.id}:100`;
+      const failureCounts = new Map([[failureKey, 2]]);
 
       (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true,
@@ -126,6 +137,11 @@ describe('Integration Tests', () => {
       });
       (parseRss as ReturnType<typeof vi.fn>).mockReturnValue(mockItems);
       (getMaxProcessedId as ReturnType<typeof vi.fn>).mockResolvedValue(200);
+      (clearItemFailureCount as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, feedId: string, nttNo: string) => {
+          failureCounts.delete(`${feedId}:${nttNo}`);
+        },
+      );
 
       const stats = await run(mockEnv, [NOTICE_FEED]);
 
@@ -133,6 +149,8 @@ describe('Integration Tests', () => {
       expect(stats.created).toBe(0);
       expect(generateSummary).not.toHaveBeenCalled();
       expect(generateEventInfos).not.toHaveBeenCalled();
+      expect(clearItemFailureCount).toHaveBeenCalledWith(mockEnv, NOTICE_FEED.id, '100');
+      expect(failureCounts.has(failureKey)).toBe(false);
     });
 
     it('iterates every configured feed', async () => {
@@ -362,6 +380,173 @@ describe('Integration Tests', () => {
       // The watermark must stay below the failed id so the next run reaches it again,
       // even though the newer item 202 succeeded.
       expect(updateMaxProcessedId).toHaveBeenCalledWith(mockEnv, NOTICE_FEED.id, '200');
+
+      vi.useRealTimers();
+    });
+
+    // Trace: AC-1/AC-2 — failure streaks persist across runs and give up after three failures.
+    it('permanently skips an item after three consecutive failures and advances the watermark', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const failingItem: RssItem = {
+        id: '201',
+        title: '영구 실패',
+        link: 'https://www.knue.ac.kr/notice/201',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>계속 실패하는 케이스</p>',
+      };
+      const goodItem: RssItem = {
+        id: '202',
+        title: '정상',
+        link: 'https://www.knue.ac.kr/notice/202',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>정상 케이스</p>',
+      };
+      const failureCounts = new Map<string, number>();
+      let watermark = 0;
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue([failingItem, goodItem]);
+      (getMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => watermark,
+      );
+      (getItemFailureCount as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, feedId: string, nttNo: string) =>
+          failureCounts.get(`${feedId}:${nttNo}`) ?? 0,
+      );
+      (recordItemFailure as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, feedId: string, nttNo: string) => {
+          const key = `${feedId}:${nttNo}`;
+          const next = (failureCounts.get(key) ?? 0) + 1;
+          failureCounts.set(key, next);
+          return next;
+        },
+      );
+      (clearItemFailureCount as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, feedId: string, nttNo: string) => {
+          failureCounts.delete(`${feedId}:${nttNo}`);
+        },
+      );
+      (updateMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, _feedId: string, id: string) => {
+          watermark = Math.max(watermark, Number(id));
+        },
+      );
+      (generateSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+        summary: '요약',
+        highlights: [],
+        actionItems: [],
+        links: [],
+      });
+      (generateEventInfos as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, item: RssItem) => {
+          if (item.id === failingItem.id) {
+            throw new AiResponseParseError('Failed to parse event JSON');
+          }
+          return [
+            {
+              title: '행사',
+              description: '',
+              startDate: '2026-04-20',
+              endDate: '2026-04-20',
+            },
+          ];
+        },
+      );
+      (createEvent as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'evt-202',
+        htmlLink: 'https://calendar.example/evt-202',
+      });
+
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+
+      expect(failureCounts.get(`${NOTICE_FEED.id}:${failingItem.id}`)).toBe(3);
+      expect(generateEventInfos).toHaveBeenCalledTimes(6);
+      expect(updateMaxProcessedId).toHaveBeenLastCalledWith(mockEnv, NOTICE_FEED.id, '202');
+
+      await run(mockEnv, [NOTICE_FEED]);
+
+      expect(generateEventInfos).toHaveBeenCalledTimes(6);
+      expect(watermark).toBe(202);
+
+      vi.useRealTimers();
+    });
+
+    it('keeps transient processing failures retryable instead of giving up', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const transientFailureItem: RssItem = {
+        id: '201',
+        title: '일시 장애',
+        link: 'https://www.knue.ac.kr/notice/201',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>일시적인 Ollama 장애</p>',
+      };
+      const goodItem: RssItem = {
+        id: '202',
+        title: '정상',
+        link: 'https://www.knue.ac.kr/notice/202',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>정상 케이스</p>',
+      };
+      let watermark = 0;
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue([
+        transientFailureItem,
+        goodItem,
+      ]);
+      (getMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => watermark,
+      );
+      (updateMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, _feedId: string, id: string) => {
+          watermark = Math.max(watermark, Number(id));
+        },
+      );
+      (generateSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+        summary: '요약',
+        highlights: [],
+        actionItems: [],
+        links: [],
+      });
+      (generateEventInfos as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, item: RssItem) => {
+          if (item.id === transientFailureItem.id) {
+            throw new Error('Ollama request failed');
+          }
+          return [
+            {
+              title: '행사',
+              description: '',
+              startDate: '2026-04-20',
+              endDate: '2026-04-20',
+            },
+          ];
+        },
+      );
+      (createEvent as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'evt-202',
+        htmlLink: 'https://calendar.example/evt-202',
+      });
+
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+
+      expect(recordItemFailure).not.toHaveBeenCalled();
+      expect(updateMaxProcessedId).toHaveBeenLastCalledWith(mockEnv, NOTICE_FEED.id, '200');
+      expect(watermark).toBe(200);
 
       vi.useRealTimers();
     });

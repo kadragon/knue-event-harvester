@@ -6,6 +6,9 @@ import {
   putProcessedRecord,
   getMaxProcessedId,
   updateMaxProcessedId,
+  getItemFailureCount,
+  recordItemFailure,
+  clearItemFailureCount,
   type StateEnv,
 } from '../../src/lib/state.js';
 import type { ProcessedRecord } from '../../src/types.js';
@@ -259,6 +262,37 @@ describe('State Module', () => {
       await updateMaxProcessedId(env, 'bbs28', 'not-a-number');
 
       expect(await getMaxProcessedId(env, 'bbs28')).toBe(5000);
+    });
+  });
+
+  describe('item failure counts', () => {
+    it('persists consecutive failures per feed and item', async () => {
+      expect(await getItemFailureCount(env, 'bbs28', '123')).toBe(0);
+
+      expect(await recordItemFailure(env, 'bbs28', '123')).toBe(1);
+      expect(await recordItemFailure(env, 'bbs28', '123')).toBe(2);
+      expect(await getItemFailureCount(env, 'bbs28', '123')).toBe(2);
+
+      expect(await recordItemFailure(env, 'bbs250', '123')).toBe(1);
+      expect(await getItemFailureCount(env, 'bbs28', '123')).toBe(2);
+      expect(await getItemFailureCount(env, 'bbs250', '123')).toBe(1);
+    });
+
+    it('clears a failure count so a later failure starts a new streak', async () => {
+      await recordItemFailure(env, 'bbs28', '123');
+      await recordItemFailure(env, 'bbs28', '123');
+
+      await clearItemFailureCount(env, 'bbs28', '123');
+
+      expect(await getItemFailureCount(env, 'bbs28', '123')).toBe(0);
+      expect(await recordItemFailure(env, 'bbs28', '123')).toBe(1);
+    });
+
+    it('treats a malformed stored count as zero', async () => {
+      db.prepare("INSERT INTO meta (key, value) VALUES ('_item_failure_count:bbs28:123', 'invalid')").run();
+
+      expect(await getItemFailureCount(env, 'bbs28', '123')).toBe(0);
+      expect(await recordItemFailure(env, 'bbs28', '123')).toBe(1);
     });
   });
 });

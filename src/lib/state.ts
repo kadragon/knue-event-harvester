@@ -9,6 +9,7 @@ export interface StateEnv {
 
 export const LEGACY_FEED_ID = "bbs28";
 const MAX_PROCESSED_ID_KEY_PREFIX = "_max_processed_id";
+const ITEM_FAILURE_COUNT_KEY_PREFIX = "_item_failure_count";
 
 function makeKey(feedId: string, nttNo: string): string {
   return `${feedId}:${nttNo}`;
@@ -16,6 +17,10 @@ function makeKey(feedId: string, nttNo: string): string {
 
 function maxIdKey(feedId: string): string {
   return `${MAX_PROCESSED_ID_KEY_PREFIX}:${feedId}`;
+}
+
+function itemFailureCountKey(feedId: string, nttNo: string): string {
+  return `${ITEM_FAILURE_COUNT_KEY_PREFIX}:${feedId}:${nttNo}`;
 }
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -144,4 +149,47 @@ export async function updateMaxProcessedId(
         .run(maxIdKey(feedId), numId.toString());
     }
   })();
+}
+
+function readItemFailureCount(env: StateEnv, feedId: string, nttNo: string): number {
+  const row = env.db
+    .prepare<[string], { value: string }>("SELECT value FROM meta WHERE key = ?")
+    .get(itemFailureCountKey(feedId, nttNo));
+  if (!row) return 0;
+
+  const count = Number.parseInt(row.value, 10);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+
+export async function getItemFailureCount(
+  env: StateEnv,
+  feedId: string,
+  nttNo: string,
+): Promise<number> {
+  return readItemFailureCount(env, feedId, nttNo);
+}
+
+export async function recordItemFailure(
+  env: StateEnv,
+  feedId: string,
+  nttNo: string,
+): Promise<number> {
+  return env.db.transaction(() => {
+    const nextCount = readItemFailureCount(env, feedId, nttNo) + 1;
+    env.db
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(itemFailureCountKey(feedId, nttNo), nextCount.toString());
+    return nextCount;
+  })();
+}
+
+export async function clearItemFailureCount(
+  env: StateEnv,
+  feedId: string,
+  nttNo: string,
+): Promise<void> {
+  env.db.prepare("DELETE FROM meta WHERE key = ?").run(itemFailureCountKey(feedId, nttNo));
 }
