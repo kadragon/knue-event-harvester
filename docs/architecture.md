@@ -68,7 +68,7 @@ CREATE TABLE meta (
 ```
 
 The `meta` KV store also holds per-feed/item failure streaks under
-`_item_failure_count:<feedId>:<nttNo>`. After three consecutive processing failures,
+`_item_failure_count:<feedId>:<nttNo>`. After three consecutive item-specific AI parse failures,
 the item is permanently skipped and a numeric feed watermark may advance past it;
 successful or already-processed handling clears the streak. Historical failures that
 were already passed by a watermark are not recoverable from current state.

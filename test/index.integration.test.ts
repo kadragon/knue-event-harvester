@@ -478,6 +478,79 @@ describe('Integration Tests', () => {
       vi.useRealTimers();
     });
 
+    it('keeps transient processing failures retryable instead of giving up', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-17'));
+
+      const transientFailureItem: RssItem = {
+        id: '201',
+        title: '일시 장애',
+        link: 'https://www.knue.ac.kr/notice/201',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>일시적인 Ollama 장애</p>',
+      };
+      const goodItem: RssItem = {
+        id: '202',
+        title: '정상',
+        link: 'https://www.knue.ac.kr/notice/202',
+        pubDate: '2026-04-16',
+        descriptionHtml: '<p>정상 케이스</p>',
+      };
+      let watermark = 0;
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<rss/>'),
+      });
+      (parseRss as ReturnType<typeof vi.fn>).mockReturnValue([
+        transientFailureItem,
+        goodItem,
+      ]);
+      (getMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => watermark,
+      );
+      (updateMaxProcessedId as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, _feedId: string, id: string) => {
+          watermark = Math.max(watermark, Number(id));
+        },
+      );
+      (generateSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+        summary: '요약',
+        highlights: [],
+        actionItems: [],
+        links: [],
+      });
+      (generateEventInfos as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_env: unknown, item: RssItem) => {
+          if (item.id === transientFailureItem.id) {
+            throw new Error('Ollama request failed');
+          }
+          return [
+            {
+              title: '행사',
+              description: '',
+              startDate: '2026-04-20',
+              endDate: '2026-04-20',
+            },
+          ];
+        },
+      );
+      (createEvent as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'evt-202',
+        htmlLink: 'https://calendar.example/evt-202',
+      });
+
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+      await run(mockEnv, [NOTICE_FEED]);
+
+      expect(recordItemFailure).not.toHaveBeenCalled();
+      expect(updateMaxProcessedId).toHaveBeenLastCalledWith(mockEnv, NOTICE_FEED.id, '200');
+      expect(watermark).toBe(200);
+
+      vi.useRealTimers();
+    });
+
     it('skips a numeric item that already has a processed record above the watermark', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-17'));

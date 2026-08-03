@@ -353,14 +353,18 @@ async function runFeed(
       // than at Ollama being down.
       const cause = error instanceof AiResponseParseError ? "unusable AI response" : "error";
       console.error(`Failed to process item ${item.id} (feed=${feed.id}) — ${cause}`, error);
-      const consecutiveFailureCount = await recordItemFailure(env, feed.id, item.id);
-      if (consecutiveFailureCount >= MAX_CONSECUTIVE_ITEM_FAILURES) {
-        // Trace: AC-2 — the third failure makes the item permanently skippable and watermark-advancable.
-        console.warn(
-          `[${feed.id}] Permanently skipped item ${item.id} after ${consecutiveFailureCount} consecutive failures`,
-        );
-        if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
-          maxAdvancableId = itemId;
+      if (error instanceof AiResponseParseError) {
+        const consecutiveFailureCount = await recordItemFailure(env, feed.id, item.id);
+        if (consecutiveFailureCount >= MAX_CONSECUTIVE_ITEM_FAILURES) {
+          // Trace: AC-2 — the third item-specific parse failure makes the item permanently skippable.
+          console.warn(
+            `[${feed.id}] Permanently skipped item ${item.id} after ${consecutiveFailureCount} consecutive parse failures`,
+          );
+          if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
+            maxAdvancableId = itemId;
+          }
+        } else if (!Number.isNaN(itemId) && itemId < minFailedId) {
+          minFailedId = itemId;
         }
       } else if (!Number.isNaN(itemId) && itemId < minFailedId) {
         minFailedId = itemId;
