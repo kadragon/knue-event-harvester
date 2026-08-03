@@ -67,6 +67,12 @@ CREATE TABLE meta (
 );
 ```
 
+The `meta` KV store also holds per-feed/item failure streaks under
+`_item_failure_count:<feedId>:<nttNo>`. After three consecutive processing failures,
+the item is permanently skipped and a numeric feed watermark may advance past it;
+successful or already-processed handling clears the streak. Historical failures that
+were already passed by a watermark are not recoverable from current state.
+
 Schema evolution is **additive only** — no migration framework. `ALTER TABLE ... DROP COLUMN`, `DROP TABLE`, and `RENAME COLUMN` are forbidden (see Golden Principle 3). Breaking changes require wiping `data/state.db`.
 
 ## External Integrations

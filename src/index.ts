@@ -14,6 +14,9 @@ import {
   putProcessedRecord,
   getMaxProcessedId,
   updateMaxProcessedId,
+  getItemFailureCount,
+  recordItemFailure,
+  clearItemFailureCount,
   openDatabase,
   LEGACY_FEED_ID,
   type StateEnv,
@@ -44,6 +47,8 @@ export const FEEDS: readonly FeedSource[] = [
     label: "행사세미나",
   },
 ];
+
+const MAX_CONSECUTIVE_ITEM_FAILURES = 3;
 
 function buildCalendarEventUrl(eventId: string, calendarId: string): string {
   const eidRaw = `${eventId} ${calendarId}`;
@@ -283,12 +288,14 @@ async function runFeed(
   let created = 0;
   const skippedItems: string[] = [];
   const alreadyProcessedItems: string[] = [];
-  let maxSuccessfulId = 0;
+  let maxAdvancableId = 0;
   let minFailedId = Number.POSITIVE_INFINITY;
 
   for (const item of items) {
     const itemId = Number.parseInt(item.id, 10);
     if (!Number.isNaN(itemId) && itemId <= maxProcessedId) {
+      // Trace: AC-1 — an early-exit item must not retain a stale failure streak.
+      await clearItemFailureCount(env, feed.id, item.id);
       alreadyProcessedItems.push(item.id);
       processed += 1;
       break;
@@ -302,14 +309,29 @@ async function runFeed(
     // Check the processed record for every item, not just non-numeric ids: once a failure
     // caps the watermark, the numeric items above the cap are re-read each run, and only
     // this lookup keeps them from paying for AI enrichment (and re-writing their record)
-    // again. They still count toward maxSuccessfulId so the watermark can move once the
+    // again. They still count toward maxAdvancableId so the watermark can move once the
     // failure clears.
     const already = await getProcessedRecord(env, feed.id, item.id);
     if (already) {
+      // Trace: AC-1 — a successful prior run clears any stale failure streak.
+      await clearItemFailureCount(env, feed.id, item.id);
       alreadyProcessedItems.push(item.id);
       processed += 1;
-      if (!Number.isNaN(itemId) && itemId > maxSuccessfulId) {
-        maxSuccessfulId = itemId;
+      if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
+        maxAdvancableId = itemId;
+      }
+      continue;
+    }
+
+    const failureCount = await getItemFailureCount(env, feed.id, item.id);
+    if (failureCount >= MAX_CONSECUTIVE_ITEM_FAILURES) {
+      // Trace: AC-2 — a previously exhausted failure streak is never sent to AI again.
+      console.warn(
+        `[${feed.id}] Permanently skipped item ${item.id} after ${failureCount} consecutive failures`,
+      );
+      processed += 1;
+      if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
+        maxAdvancableId = itemId;
       }
       continue;
     }
@@ -318,10 +340,12 @@ async function runFeed(
       const results = await processNewItem(
         env, feed.id, item, accessToken, existing, similarityThreshold,
       );
+      // Trace: AC-1 — successful processing starts a fresh failure streak.
+      await clearItemFailureCount(env, feed.id, item.id);
       processed += 1;
       created += results.length;
-      if (!Number.isNaN(itemId) && itemId > maxSuccessfulId) {
-        maxSuccessfulId = itemId;
+      if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
+        maxAdvancableId = itemId;
       }
     } catch (error) {
       // Separate the two abort causes in the logs: a parse failure means the model
@@ -329,7 +353,16 @@ async function runFeed(
       // than at Ollama being down.
       const cause = error instanceof AiResponseParseError ? "unusable AI response" : "error";
       console.error(`Failed to process item ${item.id} (feed=${feed.id}) — ${cause}`, error);
-      if (!Number.isNaN(itemId) && itemId < minFailedId) {
+      const consecutiveFailureCount = await recordItemFailure(env, feed.id, item.id);
+      if (consecutiveFailureCount >= MAX_CONSECUTIVE_ITEM_FAILURES) {
+        // Trace: AC-2 — the third failure makes the item permanently skippable and watermark-advancable.
+        console.warn(
+          `[${feed.id}] Permanently skipped item ${item.id} after ${consecutiveFailureCount} consecutive failures`,
+        );
+        if (!Number.isNaN(itemId) && itemId > maxAdvancableId) {
+          maxAdvancableId = itemId;
+        }
+      } else if (!Number.isNaN(itemId) && itemId < minFailedId) {
         minFailedId = itemId;
       }
     }
@@ -338,11 +371,11 @@ async function runFeed(
   // Cap the watermark below the lowest failed id: without this, a failure older than a
   // later success is skipped forever, because the watermark jumps past it. Items above the
   // cap get re-read next run — duplicate creation is already blocked by validateEventGroup.
-  const watermark = Math.min(maxSuccessfulId, minFailedId - 1);
-  if (watermark < maxSuccessfulId) {
+  const watermark = Math.min(maxAdvancableId, minFailedId - 1);
+  if (watermark < maxAdvancableId) {
     // Make the stall observable: an item that never succeeds pins the feed here forever.
     console.warn(
-      `[${feed.id}] Watermark held at ${watermark} instead of ${maxSuccessfulId} by failed item ${minFailedId} — it will be retried next run`,
+      `[${feed.id}] Watermark held at ${watermark} instead of ${maxAdvancableId} by failed item ${minFailedId} — it will be retried next run`,
     );
   }
   if (watermark > 0) {
