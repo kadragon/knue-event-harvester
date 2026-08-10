@@ -20,11 +20,11 @@
     "dotenv": "^17.4.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "lefthook": "^2.1.10",
-    "tsx": "^4.23.9",
+    "tsx": "^4.23.10",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
     "vitest": "^4.0.16"
