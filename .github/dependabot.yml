@@ -10,13 +10,10 @@ updates:
     schedule:
       interval: "weekly"
     groups:
-      # Minor and patch updates in a single PR
+      # All updates, major included, in a single PR
       dependencies:
         patterns:
           - "*"
-        update-types:
-          - "minor"
-          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -26,6 +23,3 @@ updates:
       github-actions:
         patterns:
           - "*"
-        update-types:
-          - "minor"
-          - "patch"
